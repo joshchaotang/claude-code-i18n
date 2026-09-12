@@ -19,7 +19,7 @@ export async function unpatchCommand(): Promise<void> {
       return;
     }
 
-    spinner.start('Restoring original cli.js...');
+    spinner.start(`Restoring original ${cc.kind === 'binary' ? 'Claude Code binary' : 'cli.js'}...`);
     const restored = await restoreBackup(cc.cliPath);
     if (!restored) {
       spinner.fail('Failed to restore backup.');

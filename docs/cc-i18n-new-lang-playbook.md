@@ -7,7 +7,9 @@
 
 ## 一、架構總覽
 
-cc-i18n 把 Claude Code 的 UI 翻譯成任何語言。CC 的介面是一個 ~12MB 的 minified JavaScript 打包檔（cli.js），所有 UI 字串都在裡面。
+cc-i18n 把 Claude Code 的 UI 翻譯成任何語言。CC 的介面是一個 minified JavaScript 打包檔（≤2.0 是 ~12MB 的 cli.js），所有 UI 字串都在裡面。
+
+> **CC ≥ 2.1 沒有 cli.js**：程式碼被編進原生執行檔裡。下文所有「在 cli.js 裡 grep」的步驟，先跑 `cc-i18n dump-source --output cli.js` 把內嵌的 JavaScript（原始英文版）倒出來，再對這個檔案 grep 即可。
 
 三層翻譯機制：
 

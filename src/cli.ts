@@ -8,13 +8,14 @@ import { contributeCommand } from './commands/contribute.js';
 import { checkUpdateCommand } from './commands/check-update.js';
 import { scanCommand } from './commands/scan.js';
 import { installWrapperCommand } from './commands/install-wrapper.js';
+import { dumpSourceCommand } from './commands/dump-source.js';
 
 const program = new Command();
 
 program
   .name('cc-i18n')
   .description('☯ Internationalize Claude Code — Make the entire CLI available in any language')
-  .version('1.1.0')
+  .version('1.2.0')
   .option('--verbose', 'Enable verbose output');
 
 program
@@ -62,8 +63,14 @@ program
 
 program
   .command('scan')
-  .description('Scan cli.js for untranslated user-visible strings')
+  .description('Scan Claude Code for untranslated user-visible strings')
   .action(scanCommand);
+
+program
+  .command('dump-source')
+  .description('Write the JavaScript embedded in Claude Code to a file (for grepping strings)')
+  .option('--output <path>', 'Output file path (default: ./claude-code-<version>.js)')
+  .action(dumpSourceCommand);
 
 program
   .command('install-wrapper')

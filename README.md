@@ -35,7 +35,7 @@ cc-i18n install-wrapper
 | 防線 | 原理 | 什麼時候保護你 |
 |------|------|----------------|
 | Wrapper | 每次打 `claude` 前自動檢查 | 你啟動 CC 的那一刻 |
-| Sentinel | 背景監控 CC 安裝目錄 | cli.js 被換的那一秒 |
+| Sentinel | 背景監控 CC 安裝目錄 | CC 本體（執行檔或 cli.js）被換的那一秒 |
 | CC Hook | CC 啟動時再確認一次 | CC 內部啟動流程中 |
 
 三層獨立運作，任一層壞了其他兩層照顧你。
@@ -72,7 +72,10 @@ A：不會。只改介面文字，不碰任何邏輯代碼。UNSAFE 字串（HTT
 A：`npm update -g cc-i18n && cc-i18n patch --lang zh-TW`
 
 **Q：支援 native installer 版的 CC 嗎？**
-A：目前支援 npm/Homebrew 安裝的 CC。Native installer 路徑支援開發中。
+A：支援。npm、Homebrew、native installer（`curl -fsSL https://claude.ai/install.sh | bash`）安裝的 CC 都會自動找到。
+
+**Q：Claude Code 2.1 之後沒有 cli.js 了，還能翻譯嗎？**
+A：可以。2.1 起 CC 是一個編譯好的執行檔，cc-i18n 會直接改寫執行檔裡內嵌的程式碼（檔案大小不變），macOS 上會自動重新簽章，改完還會實際啟動一次確認能跑，失敗就自動還原。代價是每次啟動慢約 0.4 秒。
 
 ## 原理
 
@@ -82,6 +85,8 @@ cc-i18n 用兩層翻譯：
 2. **postPatch 規則**：處理 JSX/createElement 等動態字串，用上下文感知的精確替換
 
 不改邏輯，只改顯示文字。patch 前自動備份，隨時可 unpatch 恢復。
+
+**CC 2.1+（原生執行檔）**：CC 不再附 `cli.js`，整包程式被編進一個 Bun 執行檔。cc-i18n 會解析執行檔內的模組表，把翻譯後的程式碼寫回原本的位置（檔案大小與結構都不變），詳見 `src/core/bun-binary.ts`。
 
 ## 貢獻
 

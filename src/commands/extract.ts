@@ -1,7 +1,8 @@
 import chalk from 'chalk';
 import fs from 'fs-extra';
 import { findClaudeCodeCli } from '../core/finder.js';
-import { extractStrings, categorizeStrings } from '../core/extractor.js';
+import { extractStringsFromSource, categorizeStrings } from '../core/extractor.js';
+import { readClaudeSource } from '../core/source.js';
 import { createSpinner } from '../ui/spinner.js';
 
 interface ExtractOptions {
@@ -17,7 +18,7 @@ export async function extractCommand(options: ExtractOptions): Promise<void> {
     spinner.succeed(`Found Claude Code v${cc.version}`);
 
     spinner.start('Extracting UI strings...');
-    const strings = await extractStrings(cc.cliPath);
+    const strings = extractStringsFromSource(await readClaudeSource(cc.cliPath));
     const categories = categorizeStrings(strings);
 
     const highCount = strings.filter(s => s.confidence === 'high').length;

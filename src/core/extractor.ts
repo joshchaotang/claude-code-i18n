@@ -1099,7 +1099,14 @@ function toKey(s: string): string {
  */
 export async function extractStrings(cliPath: string): Promise<ExtractedString[]> {
   const source = await fs.readFile(cliPath, 'utf-8');
+  return extractStringsFromSource(source);
+}
 
+/**
+ * Same as extractStrings, for source text that is already in memory
+ * (e.g. the JavaScript read out of the native Claude Code binary).
+ */
+export function extractStringsFromSource(source: string): ExtractedString[] {
   // Step 1: Known strings
   const knownResults = extractKnownStrings(source);
 

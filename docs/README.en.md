@@ -35,7 +35,7 @@ Run `claude --help` — if you see Chinese, you're done.
 | Layer | How It Works | When It Protects You |
 |-------|-------------|----------------------|
 | Wrapper | Checks before every `claude` launch | The moment you start CC |
-| Sentinel | Background file watcher on CC install dir | The second cli.js gets replaced |
+| Sentinel | Background file watcher on CC install dir | The second the CC binary (or cli.js) gets replaced |
 | CC Hook | SessionStart hook re-verifies | During CC's internal startup |
 
 All three layers are independent. If one breaks, the other two still protect you.
@@ -72,7 +72,10 @@ A: No. Only UI text is changed — no logic code is touched. Unsafe strings (HTT
 A: `npm update -g cc-i18n && cc-i18n patch --lang zh-TW`
 
 **Q: Does it support native installer CC?**
-A: Currently supports npm/Homebrew installations. Native installer support is in development.
+A: Yes. npm, Homebrew and native-installer (`curl -fsSL https://claude.ai/install.sh | bash`) installations are all detected.
+
+**Q: Claude Code 2.1+ no longer ships cli.js. Does it still work?**
+A: Yes. Since 2.1 Claude Code is a single compiled executable; cc-i18n rewrites the JavaScript embedded in that executable in place (file size unchanged), re-signs it ad hoc on macOS, then launches it once to make sure it starts — restoring the original on any failure. The cost is ~0.4 s slower startup.
 
 ## How It Works
 
@@ -82,6 +85,8 @@ cc-i18n uses two translation layers:
 2. **postPatch rules**: Handles JSX/createElement dynamic strings with context-aware precision replacement
 
 No logic changes — only display text. Auto-backup before patching, unpatch anytime to restore.
+
+**CC 2.1+ (native executable)**: the bundle is compiled into a Bun single-file executable. cc-i18n parses the module table inside the binary and writes the translated modules back into the same region (size and section layout unchanged) — see `src/core/bun-binary.ts`.
 
 ## Contributing
 
