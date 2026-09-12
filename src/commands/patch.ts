@@ -87,7 +87,9 @@ export async function patchCommand(options: PatchOptions): Promise<void> {
     // 1. Find Claude Code
     spinner.start('Looking for Claude Code...');
     const cc = await findClaudeCodeCli();
-    spinner.succeed(`Found Claude Code v${cc.version}`);
+    spinner.succeed(
+      `Found Claude Code v${cc.version} ${chalk.dim(`(${cc.kind === 'binary' ? 'native binary' : 'cli.js'})`)}`,
+    );
 
     // 2. Determine locale
     let localeKey: string;
@@ -142,6 +144,12 @@ export async function patchCommand(options: PatchOptions): Promise<void> {
     }
     if (result.missed.length > 0) {
       console.log(chalk.yellow(`   ⚠ ${result.missed.length} strings not found in this CC version`));
+    }
+    if (cc.kind === 'binary') {
+      console.log(chalk.dim('   📦 Native binary rewritten in place; startup is ~0.4 s slower (bytecode cache off)'));
+      if (process.platform === 'darwin') {
+        console.log(chalk.dim('   🔏 macOS code signature replaced with an ad-hoc one'));
+      }
     }
 
     // 5. Patch HUD

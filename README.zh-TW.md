@@ -84,9 +84,20 @@ source ~/.zshrc
 ## 安全機制
 
 - 修改前自動備份原始檔案
-- 修改後用 `node --check` 驗證語法
+- 修改後驗證：cli.js 用 `node --check` 檢查語法；執行檔則實際啟動一次 `claude --version` 確認能跑
 - 驗證失敗自動還原
 - 隨時可用 `cc-i18n unpatch` 完整還原
+
+---
+
+## 支援的 Claude Code 版本
+
+| CC 版本 | 安裝方式 | 做法 |
+|---------|---------|------|
+| ≤ 2.0 | npm / Volta / nvm | 替換 `cli.js` 裡的字串 |
+| ≥ 2.1（沒有 cli.js） | npm、Homebrew、native installer | 直接改寫執行檔內嵌的程式碼；檔案大小不變，macOS 自動重新簽章 |
+
+2.1+ 的代價：每次啟動慢約 0.4 秒（預編譯快取失效）。
 
 ---
 

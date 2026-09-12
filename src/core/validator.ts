@@ -1,6 +1,5 @@
-import { execSync } from 'node:child_process';
+import { execSync, execFileSync } from 'node:child_process';
 import fs from 'fs-extra';
-import path from 'node:path';
 
 /**
  * Validate that a JS file is syntactically valid using node --check.
@@ -15,6 +14,27 @@ export async function validateSyntax(cliPath: string): Promise<boolean> {
     return true;
   } catch {
     return false;
+  }
+}
+
+/**
+ * Launch a (patched) Claude Code executable with `--version` and make sure it
+ * starts and prints a version. This is the last line of defence after
+ * rewriting the binary: a broken module graph, a bad signature or a syntax
+ * error in an eagerly loaded module all show up here.
+ */
+export function smokeTestBinary(binaryPath: string): { ok: boolean; output: string } {
+  try {
+    const out = execFileSync(binaryPath, ['--version'], {
+      encoding: 'utf-8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+      timeout: 120_000,
+    });
+    return { ok: /\d+\.\d+\.\d+/.test(out), output: out.trim() };
+  } catch (err) {
+    const e = err as { stdout?: string; stderr?: string; message: string };
+    const output = [e.stdout, e.stderr].filter(Boolean).join('\n').trim();
+    return { ok: false, output: output || e.message };
   }
 }
 

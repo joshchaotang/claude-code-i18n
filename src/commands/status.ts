@@ -28,6 +28,7 @@ export async function statusCommand(): Promise<void> {
   console.log();
   console.log(`   Language:     ${state.locale} (${variant})`);
   console.log(`   CC version:   ${state.ccVersion}`);
+  console.log(`   Format:       ${state.kind === 'binary' ? 'native binary (Claude Code ≥ 2.1)' : 'cli.js'}`);
   console.log(`   CLI path:     ${state.cliPath}`);
   console.log(`   Patch date:   ${new Date(state.patchDate).toLocaleString()}`);
   console.log(`   Replacements: ${state.replacements}${state.missed > 0 ? chalk.yellow(` (${state.missed} missed)`) : ''}`);

@@ -15,7 +15,7 @@ function run(args: string): string {
 describe('CLI integration', () => {
   it('should show version', () => {
     const output = run('--version');
-    expect(output).toBe('1.1.0');
+    expect(output).toBe('1.2.0');
   });
 
   it('should show help with taiji branding', () => {

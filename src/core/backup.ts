@@ -1,8 +1,10 @@
 import fs from 'fs-extra';
 import path from 'node:path';
+import os from 'node:os';
 import crypto from 'node:crypto';
 
 const BACKUP_SUFFIX = '.cc-i18n-backup';
+const BACKUP_DIR = path.join(os.homedir(), '.cc-i18n', 'backups');
 
 export interface BackupInfo {
   path: string;
@@ -11,8 +13,20 @@ export interface BackupInfo {
   size: number;
 }
 
-function getBackupPath(cliPath: string): string {
-  return cliPath + BACKUP_SUFFIX;
+/**
+ * Where the pristine copy of a Claude Code file is kept.
+ *
+ * - `cli.js` (Claude Code <= 2.0): next to the file, as before.
+ * - native binaries (Claude Code >= 2.1): under ~/.cc-i18n/backups/, so that
+ *   the installer's own directories (e.g. ~/.local/share/claude/versions/)
+ *   never see a stray 200 MB file.
+ */
+export function getBackupPath(cliPath: string): string {
+  if (cliPath.endsWith('.js')) {
+    return cliPath + BACKUP_SUFFIX;
+  }
+  const hash = crypto.createHash('sha1').update(cliPath).digest('hex').slice(0, 10);
+  return path.join(BACKUP_DIR, `${path.basename(cliPath)}.${hash}${BACKUP_SUFFIX}`);
 }
 
 function computeMd5(filePath: string): string {
@@ -21,17 +35,16 @@ function computeMd5(filePath: string): string {
 }
 
 /**
- * Create a backup of the original cli.js before patching.
+ * Create a backup of the original file before patching.
  * If a backup already exists, it is preserved (we only back up the original).
  *
- * @param cliPath - Path to the cli.js file to back up
  * @returns Path to the backup file
  */
 export async function createBackup(cliPath: string): Promise<string> {
   const backupPath = getBackupPath(cliPath);
 
-  // Only create backup if one doesn't exist yet (preserve the original)
   if (!await fs.pathExists(backupPath)) {
+    await fs.ensureDir(path.dirname(backupPath));
     await fs.copy(cliPath, backupPath);
   }
 
@@ -39,9 +52,8 @@ export async function createBackup(cliPath: string): Promise<string> {
 }
 
 /**
- * Restore cli.js from backup.
+ * Restore the original file from its backup.
  *
- * @param cliPath - Path where cli.js should be restored
  * @returns true if restore succeeded
  */
 export async function restoreBackup(cliPath: string): Promise<boolean> {
@@ -66,11 +78,10 @@ export async function removeBackup(cliPath: string): Promise<void> {
 }
 
 /**
- * Check if a valid backup exists.
+ * Check if a backup exists.
  */
 export async function hasValidBackup(cliPath: string): Promise<boolean> {
-  const backupPath = getBackupPath(cliPath);
-  return fs.pathExists(backupPath);
+  return fs.pathExists(getBackupPath(cliPath));
 }
 
 /**
@@ -95,7 +106,7 @@ export async function getBackupInfo(cliPath: string): Promise<BackupInfo | null>
 }
 
 /**
- * Compute MD5 hash of the current cli.js (for detecting CC updates).
+ * Compute MD5 hash of the current Claude Code file (for detecting CC updates).
  */
 export function getCliMd5(cliPath: string): string {
   return computeMd5(cliPath);

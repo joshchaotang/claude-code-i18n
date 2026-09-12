@@ -2,8 +2,12 @@ import fs from 'fs-extra';
 import path from 'node:path';
 import os from 'node:os';
 import { execSync } from 'node:child_process';
-import { createBackup, restoreBackup, hasValidBackup, removeBackup } from './backup.js';
+import { createBackup, restoreBackup, hasValidBackup, removeBackup, getBackupPath } from './backup.js';
 import { getCliMd5 } from './backup.js';
+import { parseBunModuleGraph, extractJsSources, rewriteBunModuleGraph } from './bun-binary.js';
+import { needsCodesign, adhocCodesign } from './codesign.js';
+import { smokeTestBinary } from './validator.js';
+import { detectPatchTarget, readClaudeSource, type PatchTarget } from './source.js';
 import type { TranslationSchema } from '../translations/schema.js';
 
 const STATE_DIR = path.join(os.homedir(), '.cc-i18n');
@@ -83,6 +87,11 @@ export interface PatchState {
   missedKeys: string[];
   unsafeSkipped?: number;
   contextSkipped?: number;
+  /** 'js' for cli.js (Claude Code <= 2.0), 'binary' for the native executable (>= 2.1). */
+  kind?: PatchTarget;
+  /** Size / mtime (seconds) of the patched file — cheap update check for the wrapper. */
+  cliSize?: number;
+  cliMtime?: number;
 }
 
 export interface PatchResult {
@@ -151,37 +160,6 @@ function isUIContext(source: string, matchIndex: number): boolean {
   }
 
   return false;
-}
-
-/**
- * Context-aware replacement: only replaces within recognized UI contexts.
- * For multi-occurrence strings where blind replaceAll could hit protocol code.
- */
-function contextAwareReplace(
-  source: string,
-  search: string,
-  replace: string,
-): { result: string; count: number; skipped: number } {
-  let result = '';
-  let lastEnd = 0;
-  let count = 0;
-  let skipped = 0;
-  let idx = source.indexOf(search);
-
-  while (idx !== -1) {
-    if (isUIContext(source, idx)) {
-      result += source.substring(lastEnd, idx) + replace;
-      count++;
-    } else {
-      result += source.substring(lastEnd, idx) + search;
-      skipped++;
-    }
-    lastEnd = idx + search.length;
-    idx = source.indexOf(search, lastEnd);
-  }
-
-  result += source.substring(lastEnd);
-  return { result, count, skipped };
 }
 
 /**
@@ -1573,103 +1551,213 @@ function applyPostPatch(
   return { source, count };
 }
 
+export interface TranslateResult {
+  source: string;
+  applied: number;
+  missed: string[];
+  skipped: string[];
+  contextSkipped: number;
+  total: number;
+}
+
 /**
- * Apply translation patch to Claude Code's cli.js.
+ * Translate Claude Code's JavaScript source text. Pure — no file I/O.
  *
  * Strategy:
  * 1. UNSAFE_STRINGS are never replaced (protocol/data safety)
  * 2. Single-occurrence strings use replaceAll (safe, only one place)
  * 3. Multi-occurrence strings use context-aware replacement
  *    (only replaces within createElement/label/title/etc. contexts)
- * 4. Post-patch: syntax validation + unsafe string integrity check
- * 5. Auto-restore on any failure
+ * 4. Locale post-patch rules, then the language directive injection
  */
-export async function applyPatch(
-  cliPath: string,
+export function translateSource(
+  source: string,
   translationMap: Map<string, string>,
-  ccVersion: string,
   locale: string,
-  variant: string | null = null,
-): Promise<PatchResult> {
-  // Step 0: If already patched (backup exists), restore from backup first
-  // This prevents double-patching which produces garbage results
-  const hasBackup = await hasValidBackup(cliPath);
-  if (hasBackup) {
-    await restoreBackup(cliPath);
-    await removeBackup(cliPath);
+): TranslateResult {
+  const r = translateSegments([source], translationMap, locale);
+  return {
+    source: r.texts[0],
+    applied: r.applied,
+    missed: r.missed,
+    skipped: r.skipped,
+    contextSkipped: r.contextSkipped,
+    total: r.total,
+  };
+}
+
+export interface TranslateSegmentsResult {
+  texts: string[];
+  applied: number;
+  missed: string[];
+  skipped: string[];
+  contextSkipped: number;
+  total: number;
+}
+
+/** How a translation key can appear in the source. */
+type NeedleForm = 0 | 1 | 2; // 0 = "orig"   1 = 'orig'   2 = ,"orig")  (bare createElement text)
+
+interface TrieNode {
+  next: Map<number, TrieNode> | null;
+  term: { entry: number; form: NeedleForm } | null;
+}
+
+interface Edit {
+  start: number;
+  end: number;
+  text: string;
+}
+
+function trieInsert(root: TrieNode, needle: string, term: { entry: number; form: NeedleForm }): void {
+  let node = root;
+  for (let i = 0; i < needle.length; i++) {
+    const c = needle.charCodeAt(i);
+    node.next ??= new Map();
+    let child = node.next.get(c);
+    if (!child) {
+      child = { next: null, term: null };
+      node.next.set(c, child);
+    }
+    node = child;
   }
+  node.term = term;
+}
 
-  // Step 1: Capture original MD5 before any modification
-  const originalMd5 = getCliMd5(cliPath);
+/**
+ * Report every occurrence of every needle in `text` in a single pass.
+ * All needles start with `"`, `'` or `,` so only those positions are probed;
+ * the result is exactly what repeated indexOf() searches would find, at a
+ * fraction of the cost (Claude Code's bundle is ~35 MB of JavaScript).
+ */
+function scanNeedles(
+  text: string,
+  root: TrieNode,
+  onMatch: (entry: number, form: NeedleForm, pos: number) => void,
+): void {
+  const first = root.next;
+  if (!first) return;
+  const n = text.length;
+  for (let i = 0; i < n; i++) {
+    const c = text.charCodeAt(i);
+    if (c !== 34 && c !== 39 && c !== 44) continue; // " ' ,
+    let node = first.get(c);
+    let j = i;
+    while (node) {
+      if (node.term) onMatch(node.term.entry, node.term.form, i);
+      j++;
+      if (j >= n || !node.next) break;
+      node = node.next.get(text.charCodeAt(j));
+    }
+  }
+}
 
-  // Step 2: Backup
-  await createBackup(cliPath);
+function applyEdits(text: string, edits: Edit[]): string {
+  if (edits.length === 0) return text;
+  edits.sort((a, b) => a.start - b.start || b.end - a.end);
+  const parts: string[] = [];
+  let last = 0;
+  for (const e of edits) {
+    if (e.start < last) continue; // overlapping edit (pathological) — longest original wins
+    parts.push(text.slice(last, e.start), e.text);
+    last = e.end;
+  }
+  parts.push(text.slice(last));
+  return parts.join('');
+}
 
-  // Step 3: Read source
-  let source = await fs.readFile(cliPath, 'utf-8');
-
-  // Step 4: Build and sort replacements (longest original first)
+/**
+ * Translate one or more JavaScript source texts (the modules embedded in the
+ * Claude Code binary, or a single cli.js). Occurrence counts are global across
+ * all segments, so the single-vs-multi-occurrence decision is the same as it
+ * was for one big cli.js.
+ */
+export function translateSegments(
+  texts: string[],
+  translationMap: Map<string, string>,
+  locale: string,
+): TranslateSegmentsResult {
+  // Step 1: Sort replacements (longest original first)
   const entries = [...translationMap.entries()]
     .sort((a, b) => b[0].length - a[0].length);
 
-  // Step 5: Replace with safety checks
-  let applied = 0;
-  const missed: string[] = [];
+  // Step 2: Build one trie of every needle we look for
+  const root: TrieNode = { next: null, term: null };
+  const active: number[] = [];
   const skipped: string[] = [];
-  let totalContextSkipped = 0;
-
-  for (const [original, translated] of entries) {
-    if (original === translated) continue;
-
-    // Skip unsafe strings
+  entries.forEach(([original, translated], idx) => {
+    if (original === translated) return;
     if (UNSAFE_STRINGS.has(original)) {
       skipped.push(original);
-      continue;
+      return;
     }
+    active.push(idx);
+    trieInsert(root, `"${original}"`, { entry: idx, form: 0 });
+    trieInsert(root, `'${original}'`, { entry: idx, form: 1 });
+    if (original.includes(' ')) {
+      trieInsert(root, `,${JSON.stringify(original)})`, { entry: idx, form: 2 });
+    }
+  });
 
+  // Step 3: One scan per segment — where does each needle occur?
+  const occurrences: Map<number, number[][]>[] = texts.map(() => new Map());
+  const doubleCount = new Uint32Array(entries.length);
+  const singleCount = new Uint32Array(entries.length);
+  texts.forEach((text, s) => {
+    scanNeedles(text, root, (entry, form, pos) => {
+      let lists = occurrences[s].get(entry);
+      if (!lists) {
+        lists = [[], [], []];
+        occurrences[s].set(entry, lists);
+      }
+      lists[form].push(pos);
+      if (form === 0) doubleCount[entry]++;
+      else if (form === 1) singleCount[entry]++;
+    });
+  });
+
+  // Step 4: Decide, entry by entry, which occurrences get replaced
+  let applied = 0;
+  const missed: string[] = [];
+  let contextSkipped = 0;
+  const edits: Edit[][] = texts.map(() => []);
+
+  for (const idx of active) {
+    const [original, translated] = entries[idx];
+    const totalCount = doubleCount[idx] + singleCount[idx];
+    // Single occurrence OR whitelisted: safe to replace blindly.
+    // Multiple occurrences: only within recognized UI contexts.
+    const blind = totalCount <= 1 || WHITELIST_STRINGS.has(original);
+    const quotedLen = original.length + 2;
     let replaced = false;
 
-    // Count occurrences to decide strategy
-    const doubleSearch = `"${original}"`;
-    const singleSearch = `'${original}'`;
-    const doubleCount = countOccurrences(source, doubleSearch);
-    const singleCount = countOccurrences(source, singleSearch);
-    const totalCount = doubleCount + singleCount;
-    const forceReplace = WHITELIST_STRINGS.has(original);
-
-    if (totalCount <= 1 || forceReplace) {
-      // Single occurrence OR whitelisted: safe to replaceAll
-      if (doubleCount > 0) {
-        source = replaceAll(source, doubleSearch, `"${translated}"`);
-        replaced = true;
-      }
-      if (singleCount > 0) {
-        source = replaceAll(source, singleSearch, `'${translated}'`);
-        replaced = true;
-      }
-    } else {
-      // Multiple occurrences: context-aware replacement
-      if (doubleCount > 0) {
-        const r = contextAwareReplace(source, doubleSearch, `"${translated}"`);
-        source = r.result;
-        if (r.count > 0) replaced = true;
-        totalContextSkipped += r.skipped;
-      }
-      if (singleCount > 0) {
-        const r = contextAwareReplace(source, singleSearch, `'${translated}'`);
-        source = r.result;
-        if (r.count > 0) replaced = true;
-        totalContextSkipped += r.skipped;
+    for (let s = 0; s < texts.length; s++) {
+      const lists = occurrences[s].get(idx);
+      if (!lists) continue;
+      for (const form of [0, 1] as const) {
+        const replacement = form === 0 ? `"${translated}"` : `'${translated}'`;
+        for (const pos of lists[form]) {
+          if (blind || isUIContext(texts[s], pos)) {
+            edits[s].push({ start: pos, end: pos + quotedLen, text: replacement });
+            replaced = true;
+          } else {
+            contextSkipped++;
+          }
+        }
       }
     }
 
     // Bare text fallback for JSX/createElement content
     if (!replaced && original.includes(' ')) {
-      const bareSearch = `,${JSON.stringify(original)})`;
+      const bareLen = JSON.stringify(original).length + 2;
       const bareReplace = `,${JSON.stringify(translated)})`;
-      if (source.includes(bareSearch)) {
-        source = replaceAll(source, bareSearch, bareReplace);
-        replaced = true;
+      for (let s = 0; s < texts.length; s++) {
+        const lists = occurrences[s].get(idx);
+        if (!lists) continue;
+        for (const pos of lists[2]) {
+          edits[s].push({ start: pos, end: pos + bareLen, text: bareReplace });
+          replaced = true;
+        }
       }
     }
 
@@ -1680,14 +1768,35 @@ export async function applyPatch(
     }
   }
 
-  // Step 5b: Locale-aware post-patch replacements
+  const out = texts.map((text, s) => applyEdits(text, edits[s]));
+
+  // Step 5: Locale-aware post-patch replacements
   // These handle strings that can't be replaced via the translation map
   // (apostrophe-split strings, template literals, UI symbols)
-  const postPatchApplied = applyPostPatch(source, locale);
-  source = postPatchApplied.source;
-  applied += postPatchApplied.count;
+  for (const rule of getPostPatchRules(locale)) {
+    let matched = false;
+    if (rule.regex) {
+      const re = new RegExp(rule.search, 'g');
+      for (let s = 0; s < out.length; s++) {
+        re.lastIndex = 0;
+        const replaced = out[s].replace(re, rule.replace);
+        if (replaced !== out[s]) {
+          out[s] = replaced;
+          matched = true;
+        }
+      }
+    } else {
+      for (let s = 0; s < out.length; s++) {
+        if (out[s].includes(rule.search)) {
+          out[s] = replaceAll(out[s], rule.search, rule.replace);
+          matched = true;
+        }
+      }
+    }
+    if (matched) applied++;
+  }
 
-  // Step 5c: Inject language directive into system prompt assembler
+  // Step 6: Inject language directive into system prompt assembler
   // H5(q) is the identity function that passes system prompt arrays to the API.
   // By modifying it to append a language instruction, ALL 20+ system prompt
   // call sites automatically include the directive — no per-site patching needed.
@@ -1697,39 +1806,80 @@ export async function applyPatch(
     // Replace: function H5(q){return[...q,"<directive>"]}
     // Use regex for resilience to minified function name changes
     const h5Pattern = /function (\w+)\((\w+)\)\{return \2\}(var \w+=\d+;async function)/;
-    const h5Match = source.match(h5Pattern);
-    if (h5Match) {
-      const [fullMatch, fnName, paramName, afterContext] = h5Match;
-      const injection = `function ${fnName}(${paramName}){return[...${paramName},${JSON.stringify(langDirective)}]}${afterContext}`;
-      source = source.replace(fullMatch, injection);
-      applied++;
+    for (let s = 0; s < out.length; s++) {
+      const h5Match = out[s].match(h5Pattern);
+      if (h5Match) {
+        const [fullMatch, fnName, paramName, afterContext] = h5Match;
+        const injection = `function ${fnName}(${paramName}){return[...${paramName},${JSON.stringify(langDirective)}]}${afterContext}`;
+        out[s] = out[s].replace(fullMatch, injection);
+        applied++;
+        break;
+      }
     }
   }
 
-  // Step 6: Write patched file
-  await fs.writeFile(cliPath, source, 'utf-8');
+  return { texts: out, applied, missed, skipped, contextSkipped, total: entries.length };
+}
 
-  // Step 7: Validate JS syntax
-  const syntaxValid = await validateSyntax(cliPath);
-  if (!syntaxValid) {
-    await restoreBackup(cliPath);
-    throw new Error(
-      'Patched cli.js failed syntax validation (node --check). Original restored.\n' +
-      'A translation likely contains characters that break JS syntax.'
-    );
+/**
+ * Apply translation patch to Claude Code.
+ *
+ * Works on both packagings:
+ * - `cli.js` (Claude Code <= 2.0): the file is rewritten in place and checked
+ *   with `node --check`.
+ * - native executable (Claude Code >= 2.1): the JavaScript embedded in the Bun
+ *   binary is translated and written back (see bun-binary.ts); on macOS the
+ *   binary is re-signed ad hoc, and `claude --version` must succeed afterwards.
+ *
+ * A pristine backup is taken first and restored on any failure.
+ */
+export async function applyPatch(
+  cliPath: string,
+  translationMap: Map<string, string>,
+  ccVersion: string,
+  locale: string,
+  variant: string | null = null,
+): Promise<PatchResult> {
+  const target = detectPatchTarget(cliPath);
+
+  // Step 0: Deal with a backup left over from a previous run
+  if (await hasValidBackup(cliPath)) {
+    const currentMd5 = getCliMd5(cliPath);
+    const backupMd5 = getCliMd5(getBackupPath(cliPath));
+    if (currentMd5 !== backupMd5) {
+      const state = await loadState();
+      const isOurPatchedFile = state
+        ? state.cliPath === cliPath && state.cliMd5 === currentMd5
+        : true;
+      if (isOurPatchedFile) {
+        // Our own output — go back to the pristine original before patching again.
+        // (Otherwise a newer Claude Code replaced the file and the backup is obsolete.)
+        await restoreBackup(cliPath);
+      }
+    }
+    await removeBackup(cliPath);
   }
 
-  // Step 8: Verify unsafe strings were not accidentally replaced
-  const integrityOk = await verifyUnsafeIntegrity(cliPath);
-  if (!integrityOk) {
+  // Step 1: Capture original MD5 before any modification
+  const originalMd5 = getCliMd5(cliPath);
+
+  // Step 2: Backup
+  await createBackup(cliPath);
+
+  // Step 3: Translate — restore the original on any failure
+  let result: PatchStats;
+  try {
+    result = target === 'binary'
+      ? await patchNativeBinary(cliPath, translationMap, locale)
+      : await patchJsFile(cliPath, translationMap, locale);
+  } catch (err) {
     await restoreBackup(cliPath);
-    throw new Error(
-      'Unsafe string integrity check failed — a protocol string was modified. Original restored.\n' +
-      'This indicates a bug in the patcher. Please report it.'
-    );
+    await removeBackup(cliPath);
+    throw err;
   }
 
-  // Step 9: Save state
+  // Step 4: Save state
+  const stat = await fs.stat(cliPath);
   await saveState({
     locale,
     variant,
@@ -1738,14 +1888,104 @@ export async function applyPatch(
     cliPath,
     cliMd5: getCliMd5(cliPath),
     originalMd5,
-    replacements: applied,
-    missed: missed.length,
-    missedKeys: missed.slice(0, 20),
-    unsafeSkipped: skipped.length,
-    contextSkipped: totalContextSkipped,
+    replacements: result.applied,
+    missed: result.missed.length,
+    missedKeys: result.missed.slice(0, 20),
+    unsafeSkipped: result.skipped.length,
+    contextSkipped: result.contextSkipped,
+    kind: target,
+    cliSize: stat.size,
+    cliMtime: Math.floor(stat.mtimeMs / 1000),
   });
 
-  return { applied, missed, skipped, contextSkipped: totalContextSkipped, total: entries.length };
+  return {
+    applied: result.applied,
+    missed: result.missed,
+    skipped: result.skipped,
+    contextSkipped: result.contextSkipped,
+    total: result.total,
+  };
+}
+
+type PatchStats = Omit<TranslateResult, 'source'>;
+
+/** Claude Code <= 2.0: translate cli.js in place. */
+async function patchJsFile(
+  cliPath: string,
+  translationMap: Map<string, string>,
+  locale: string,
+): Promise<PatchStats> {
+  const original = await fs.readFile(cliPath, 'utf-8');
+  const result = translateSource(original, translationMap, locale);
+  await fs.writeFile(cliPath, result.source, 'utf-8');
+
+  if (!await validateSyntax(cliPath)) {
+    throw new Error(
+      'Patched cli.js failed syntax validation (node --check). Original restored.\n' +
+      'A translation likely contains characters that break JS syntax.'
+    );
+  }
+  if (!verifyUnsafeIntegrity([original], [result.source])) {
+    throw new Error(
+      'Unsafe string integrity check failed — a protocol string was modified. Original restored.\n' +
+      'This indicates a bug in the patcher. Please report it.'
+    );
+  }
+  return result;
+}
+
+/** Claude Code >= 2.1: translate the JavaScript embedded in the native executable. */
+async function patchNativeBinary(
+  cliPath: string,
+  translationMap: Map<string, string>,
+  locale: string,
+): Promise<PatchStats> {
+  const original = await fs.readFile(cliPath);
+  const graph = parseBunModuleGraph(original);
+  const sources = extractJsSources(original, graph);
+  const texts = sources.map(s => s.text);
+
+  const result = translateSegments(texts, translationMap, locale);
+  if (!verifyUnsafeIntegrity(texts, result.texts)) {
+    throw new Error(
+      'Unsafe string integrity check failed — a protocol string was modified. Original restored.\n' +
+      'This indicates a bug in the patcher. Please report it.'
+    );
+  }
+
+  const newTexts = new Map<number, string>();
+  result.texts.forEach((text, i) => {
+    if (text !== texts[i]) newTexts.set(sources[i].index, text);
+  });
+
+  const rewritten = rewriteBunModuleGraph(original, graph, newTexts);
+
+  // Read the result back before touching the real file
+  const check = extractJsSources(rewritten.buffer, parseBunModuleGraph(rewritten.buffer));
+  const roundTrips = check.length === result.texts.length &&
+    check.every((m, i) => m.index === sources[i].index && m.text === result.texts[i]);
+  if (!roundTrips) {
+    throw new Error('Internal error: rewritten binary does not read back correctly. Original restored.');
+  }
+
+  await fs.writeFile(cliPath, rewritten.buffer);
+  if (needsCodesign()) {
+    adhocCodesign(cliPath);
+  }
+
+  const smoke = smokeTestBinary(cliPath);
+  if (!smoke.ok) {
+    throw new Error(
+      `Patched Claude Code failed to start${smoke.output ? `: ${smoke.output}` : ''}. Original restored.`
+    );
+  }
+  return {
+    applied: result.applied,
+    missed: result.missed,
+    skipped: result.skipped,
+    contextSkipped: result.contextSkipped,
+    total: result.total,
+  };
 }
 
 /**
@@ -1765,13 +2005,11 @@ async function validateSyntax(cliPath: string): Promise<boolean> {
 }
 
 /**
- * Verify that UNSAFE_STRINGS still appear in their original English form.
- * If any unsafe string was accidentally replaced, this catches it.
+ * Verify that critical UNSAFE_STRINGS occur exactly as often after patching
+ * as before. If any of them was replaced by accident, this catches it.
  */
-async function verifyUnsafeIntegrity(cliPath: string): Promise<boolean> {
-  const source = await fs.readFile(cliPath, 'utf-8');
-
-  // Check a subset of critical protocol strings that MUST remain ASCII
+function verifyUnsafeIntegrity(before: string[], after: string[]): boolean {
+  // Protocol strings that MUST remain ASCII
   const criticalStrings = [
     '"Accept"',         // HTTP header
     '"Default"',        // Cookie/TLS
@@ -1779,13 +2017,10 @@ async function verifyUnsafeIntegrity(cliPath: string): Promise<boolean> {
     '"Allow"',          // CORS
   ];
 
-  for (const s of criticalStrings) {
-    if (!source.includes(s)) {
-      return false;
-    }
-  }
+  const total = (texts: string[], s: string) =>
+    texts.reduce((sum, text) => sum + countOccurrences(text, s), 0);
 
-  return true;
+  return criticalStrings.every(s => total(before, s) === total(after, s));
 }
 
 /**
@@ -1795,7 +2030,7 @@ export async function verifyPatch(
   cliPath: string,
   translationMap: Map<string, string>
 ): Promise<{ applied: number; missed: string[] }> {
-  const source = await fs.readFile(cliPath, 'utf-8');
+  const source = await readClaudeSource(cliPath);
   let applied = 0;
   const missed: string[] = [];
 

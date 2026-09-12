@@ -1,6 +1,6 @@
 {
   "name": "claude-code-i18n",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Internationalize Claude Code - Make the entire CLI interface available in any language",
   "type": "module",
   "bin": {

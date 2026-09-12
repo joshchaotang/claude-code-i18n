@@ -2,6 +2,8 @@ import chalk from 'chalk';
 import fs from 'fs-extra';
 import { findClaudeCodeCli } from '../core/finder.js';
 import { KNOWN_STRINGS } from '../core/extractor.js';
+import { getBackupPath } from '../core/backup.js';
+import { readClaudeSource } from '../core/source.js';
 
 /**
  * Scan cli.js for user-visible strings not yet in the translation list.
@@ -16,16 +18,16 @@ export async function scanCommand(options: { fix?: boolean }): Promise<void> {
     process.exit(1);
   }
 
-  // Use backup if available (original English), otherwise use current cli.js
-  const backupPath = cc.cliPath + '.cc-i18n-backup';
+  // Use backup if available (original English), otherwise use the current file
+  const backupPath = getBackupPath(cc.cliPath);
   const scanPath = (await fs.pathExists(backupPath)) ? backupPath : cc.cliPath;
-  const source = await fs.readFile(scanPath, 'utf-8');
+  const source = await readClaudeSource(scanPath);
 
   const isBackup = scanPath === backupPath;
   console.log();
   console.log(chalk.bold('☯ cc-i18n scan'));
   console.log(chalk.dim(`   Scanning: ${scanPath}`));
-  console.log(chalk.dim(`   Source: ${isBackup ? 'backup (original English)' : 'current cli.js'}`));
+  console.log(chalk.dim(`   Source: ${isBackup ? 'backup (original English)' : `current ${cc.kind === 'binary' ? 'native binary' : 'cli.js'}`}`));
   console.log();
 
   // Build set of all known originals
