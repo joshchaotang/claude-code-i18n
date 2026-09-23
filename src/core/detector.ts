@@ -16,6 +16,8 @@ const ENV_LOCALE_MAP: Record<string, string> = {
   'fr': 'fr',
   'de': 'de',
   'pt': 'pt',
+  'ru_RU': 'ru',
+  'ru': 'ru',
 };
 
 const TIMEZONE_LOCALE_MAP: Record<string, string> = {
@@ -32,6 +34,14 @@ const TIMEZONE_LOCALE_MAP: Record<string, string> = {
   'Europe/Paris': 'fr',
   'Europe/Berlin': 'de',
   'America/Sao_Paulo': 'pt',
+  'Europe/Moscow': 'ru',
+  'Europe/Kaliningrad': 'ru',
+  'Europe/Samara': 'ru',
+  'Asia/Yekaterinburg': 'ru',
+  'Asia/Novosibirsk': 'ru',
+  'Asia/Krasnoyarsk': 'ru',
+  'Asia/Irkutsk': 'ru',
+  'Asia/Vladivostok': 'ru',
 };
 
 export interface DetectionResult {
