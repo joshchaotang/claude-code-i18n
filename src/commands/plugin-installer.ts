@@ -45,6 +45,7 @@ function buildLanguageInstruction(locale: string, variant?: string): string {
     'fr': { lang: 'Français', terms: '' },
     'de': { lang: 'Deutsch', terms: '' },
     'pt': { lang: 'Português', terms: '' },
+    'ru': { lang: 'Русский', terms: '' },
   };
 
   const info = langMap[locale] || { lang: locale, terms: '' };

@@ -46,6 +46,7 @@ cc-i18n install-wrapper
 |------|------|------|
 | 繁體中文 | zh-TW | 完整 |
 | 簡體中文 | zh-CN | 同步中 |
+| Русский (俄文) | ru | Layer 1 完整，Layer 2 待補 |
 | 簡單英文 | en-simple | 規劃中 |
 
 想加新語言？歡迎貢獻！看 [新語言指南](docs/cc-i18n-new-lang-playbook.md)。
